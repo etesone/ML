@@ -1,0 +1,254 @@
+#  Evaluacion Machine Learning
+
+```{r Librerias, include=FALSE}
+library(data.table)
+library(inspectdf)
+library(lubridate)
+library(plyr)
+library(dplyr)
+library(missRanger)
+library(ranger)
+library(caret)
+library(cattonum)
+```
+
+##  Importación de datos
+```{r Importacion}
+labels <- as.data.frame(fread('01_labels.csv'))
+values <- as.data.frame(fread('02_trainset.csv'))
+test <- as.data.frame(fread('Test_set_values.csv'))
+```
+
+##  Creación de data frame de trabajo
+```{r Creacion de DataFrame}
+values$data_type <- c('train') 
+test$data_type <- c('test')
+datos_df <- rbind(values, test)
+```
+
+##  Vemos las variables en graficos para hacer la limpieza
+```{r EDA}
+# Categoricas
+cat_plot <- inspect_cat(datos_df)
+show_plot(cat_plot)
+
+# Correlaciones de numericas
+cor_plot <- inspect_cor(datos_df)
+show_plot(cor_plot)
+
+# Imbalance plot
+imb_plot <- inspect_imb(datos_df)
+show_plot(imb_plot)
+
+# Datos missing
+na_plot <- inspect_na(datos_df)
+show_plot(na_plot)
+
+# Histograma de datos numericos
+nums_plot <- inspect_num(datos_df)
+show_plot(nums_plot)
+```
+
+
+##  Cambio de valores cero por NA
+```{r Limpieza}
+datos_df$longitude <- ifelse(datos_df$longitude == 0, NA, datos_df$longitude)
+datos_df$population <- ifelse(datos_df$population == 0, NA, datos_df$population)
+
+```
+
+##  Calculo la edad de las bombas de agua dependiendo de la variable date_recorded
+```{r Creacion de nueva variable}
+datos_df$pump_years <- as.numeric(ymd("2020-03-20") - ymd(datos_df$date_recorded))
+
+```
+
+
+##  Borro variables con varianza casi cero, que se duplican o que tienen demasiadas categorias basado en EDA
+```{r Borro variables}
+datos_df$recorded_by <- NULL
+datos_df$num_private <- NULL
+datos_df$date_recorded <- NULL
+
+datos_df$subvillage <- NULL
+datos_df$wpt_name <- NULL
+
+datos_df$extraction_type_group <- NULL
+datos_df$extraction_type_class <- NULL
+datos_df$management_group <- NULL
+datos_df$payment_type <- NULL
+datos_df$quality_group <- NULL
+datos_df$quantity_group <- NULL
+datos_df$source_class <- NULL
+datos_df$source_type <- NULL
+```
+
+##  Imputo las variables con valores NA usando missRanger y quito mas variables que no voy a utilizar ya que no actuan de manera importante sobre la variable objectivo
+```{r missRanger}
+fillna_datos_df <- datos_df[ , -which(names(datos_df) %in% c('installer','funder','scheme_management', 'ward', 'lga', 'scheme_name'))]
+
+datos_df <- missRanger(fillna_datos_df, pmm.k = 3, splitrule = "extratrees", num.trees = 200)
+
+```
+
+## Creo una nueva variable combinando latitud y longitud
+
+```{r}
+
+datos_df$fe_lonlat <- paste(datos_df$longitude, datos_df$latitude, sep = "")
+
+
+```
+
+##  Cambio las variables booleanas a variables binarias
+```{r Binario}
+datos_df$permit<-replace(datos_df$permit, 
+                       which((datos_df$permit == TRUE)), 1)
+datos_df$permit<-replace(datos_df$permit, 
+                       which((datos_df$permit == FALSE)), 0)
+
+datos_df$public_meeting<-replace(datos_df$public_meeting, 
+                       which((datos_df$public_meeting == TRUE)), 1)
+datos_df$public_meeting<-replace(datos_df$public_meeting, 
+                       which((datos_df$public_meeting == FALSE)), 0)
+```
+
+
+## Transformo las variables restantes categoricas a numericas
+```{r}
+datos_df<-datos_df %>% catto_freq()
+```
+
+
+##  Divido el dataframe datos_df en train y test nuevamente
+```{r}
+train <- datos_df[datos_df$data_type==59400,]
+test <- datos_df[datos_df$data_type==14850,]
+
+train <- inner_join(labels, train, by = "id")
+
+train$data_type <- NULL
+test$data_type <- NULL
+
+```
+
+##  Utilizo ranger ya que fue el modelo que mayor accuracy tuvo
+```{r}
+model <- ranger(as.factor(status_group) ~ ., 
+                data = train, 
+                importance = 'impurity', 
+                verbose = TRUE, 
+                num.trees = 1000, 
+                seed = 32234
+                )
+
+model
+```
+
+##  Reviso como funciona el modelo contra el mismo train
+```{r}
+predictions_over_train <- predict(model, train)
+confusionMatrix(predictions_over_train$predictions, as.factor(train$status_group))
+```
+
+# Mi contribucion individual
+Desde este punto se encuentran mis contribuciones a los modelos. De todas maneras, variables como pump_years, fe_lonlat, la transformacion de variables a binarias y la recategorizacion de variables categoricas a numericas basadas en sus frecuencias. 
+
+## Veo la importancia de las variables dentro del modelo para intentar mejorar el modelo
+```{r}
+importance(model)
+```
+
+
+## Pruebo un nuevo modelo ranger con las variables elegidas
+```{r}
+model2 <- ranger(as.factor(status_group) ~ id + gps_height + longitude + latitude + population + construction_year + 
+                  extraction_type + quantity + waterpoint_type + waterpoint_type_group + pump_years + fe_lonlat, 
+                data = train, 
+                importance = 'impurity', 
+                verbose = TRUE, 
+                num.trees = 1000, 
+                seed = 7976
+                )
+
+model2
+```
+
+## Reviso como anda el nuevo modelo, parece ir mejor ya que el accuracy es un pelin mas alto, pero puede ser overfitting aunque le cambie la semilla y bajo de un accuracy de .99 a .96
+```{r}
+predictions_over_train <- predict(model2, train)
+confusionMatrix(predictions_over_train$predictions, as.factor(train$status_group))
+```
+
+```{r}
+importance(model2)
+```
+
+```{r}
+model3 <- ranger(as.factor(status_group) ~ id + gps_height + longitude + latitude + population + construction_year + 
+                  extraction_type + quantity + waterpoint_type + waterpoint_type_group + pump_years, 
+                data = train, 
+                importance = 'impurity', 
+                verbose = TRUE, 
+                num.trees = 1000, 
+                seed = 4570
+                )
+
+model3
+```
+
+```{r}
+predictions_over_train <- predict(model3, train)
+confusionMatrix(predictions_over_train$predictions, as.factor(train$status_group))
+```
+
+##  Generación de predicciones del modelo model sobre el test y archivo de envío
+```{r}
+
+predictions_over_test <- as.vector(predict(model, test)$prediction)
+
+
+submission <- data.frame(id = test$id, status_group = predictions_over_test)
+
+fwrite(submission, file='submission_eli3.csv', sep=",")
+```
+
+##  Generación de predicciones sobre el test y archivo de envío
+```{r}
+
+predictions_over_test <- as.vector(predict(model2, test)$prediction)
+
+
+submission <- data.frame(id = test$id, status_group = predictions_over_test)
+
+fwrite(submission, file='submission_eli4.csv', sep=",")
+```
+
+
+##  Generación de predicciones sobre el test y archivo de envío
+```{r}
+
+predictions_over_test <- as.vector(predict(model3, test)$prediction)
+
+
+submission <- data.frame(id = test$id, status_group = predictions_over_test)
+
+fwrite(submission, file='submission_eli5.csv', sep=",")
+```
+
+##  Resultado del envío utilizando el modelo model:
+![submission result](Capture.png)
+
+##  Resultado del envío utilizando el modelo model2:
+![submission result](Capture2.png)
+
+##  Resultado del envío utilizando el modelo model2:
+![submission result](Capture3.png)
+
+## Conclusion
+
+El primer modelo (model) que incluye las todas las variables filtradas al comienzo a podido predecir de mejor manera la variable objetivo.
+
+
+
+

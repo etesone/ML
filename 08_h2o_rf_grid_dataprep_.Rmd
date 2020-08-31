@@ -1,0 +1,89 @@
+---
+title: "CRÍMENES NEW YORK - UCM_ADE_Clase_1"
+author: "Carlos Ortega"
+date: "Marzo 2020"
+output:
+  html_document:
+    df_print: paged
+    toc_depth: 3
+    number_sections: true 
+    theme: yeti
+    highlight: tango
+    code_folding: hide
+    fig_width: 9
+    fig_height: 7
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+---
+
+# - Objetivo
+Se estudia el conjunto de crímenes (subconjunto de Kaggle) y se hace un modelo sobre ARREST.
+
+```{r cargo, message=FALSE, warning=FALSE, layout="l-body"}
+#-----------------------------------------
+# Condiciones: No Nas - Ranger sin caret - nuevas variables - dias como dummies. - Cats con freq. 
+
+# Library loading
+rm(list = ls())
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(caret)
+  library(scales)
+  library(ggplot2)
+  library(stringi)
+  library(stringr)
+  library(dataPreparation)
+  library(knitr)
+  library(kableExtra)
+  library(ggpubr)
+  library(tictoc)
+  library(ggeasy)
+  library(lubridate)
+  library(inspectdf)
+  library(fastDummies)
+  library(e1071) # caret lo utiliza para la confusionmatrix
+  library(MLmetrics)
+})
+```
+
+
+```{r datosdentro, message=FALSE, warning=FALSE, layout="l-body"}
+#-----------------------------------------
+# Data Loading
+datIn <- fread( file = 'Chicago_Crimes_2012_to_2017.csv', nThread = 2)
+```
+
+Limpieza mínima de quitar la columna primera (V1)
+
+```{r}
+datIn$V1 <- NULL
+names(datIn)
+```
+
+# - Uso de dataPreparation
+
+```{r}
+# Para usar bien dataPreparation me hace falta cambiar Arrest a Si/No
+datIn$fe_arrest  <- ifelse(datIn$Arrest == TRUE, 'Si', 'No')
+datIn$fe_fecha <- mdy_hms( datIn$Date)
+datIn$Date <- NULL
+
+prepareSet( datIn, finalForm = 'data.table', key = 'fe_arrest', target_col = 'fe_arrest')
+```
+
+De esta forma hago un _target_encondig_.
+
+```{r}
+names(datIn)[1] <- c('LocDesc')
+datIn$fe_arrest <- ifelse(datIn$fe_arrest == "Si", 1, 0)
+encoding <- build_target_encoding(dataSet = datIn, cols_to_encode = 'LocDesc', target_col = 'fe_arrest')
+```
+
+
+Además de _dataPreparation_ es muy interesante el conocer las posibilidaes de **vtreat** que realizar otras transformaciones pero con un sentido estadístico más profundo.
+
+```

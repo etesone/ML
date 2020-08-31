@@ -1,0 +1,257 @@
+---
+title: "CRÍMENES NEW YORK - UCM_ADE_Clase_1"
+author: "Carlos Ortega"
+date: "Marzo 2020"
+output:
+  html_document:
+    df_print: paged
+    toc_depth: 3
+    number_sections: true 
+    theme: yeti
+    highlight: tango
+    code_folding: hide
+    fig_width: 9
+    fig_height: 7
+    toc: true
+    toc_float:
+      collapsed: true
+      smooth_scroll: false
+---
+
+# - Objetivo
+Se estudia el conjunto de crímenes (subconjunto de Kaggle) y se hace un modelo sobre ARREST.
+
+```{r cargo, message=FALSE, warning=FALSE, layout="l-body"}
+#-----------------------------------------
+# Condiciones: No Nas - Ranger sin caret - nuevas variables - dias como dummies. - Cats con freq. 
+
+# Library loading
+rm(list = ls())
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(caret)
+  library(scales)
+  library(ggplot2)
+  library(stringi)
+  library(stringr)
+  library(dataPreparation)
+  library(knitr)
+  library(kableExtra)
+  library(ggpubr)
+  library(tictoc)
+  library(ggeasy)
+  library(lubridate)
+  library(inspectdf)
+  library(fastDummies)
+  library(e1071) # caret lo utiliza para la confusionmatrix
+  library(MLmetrics)
+})
+```
+
+
+```{r datosdentro, message=FALSE, warning=FALSE, layout="l-body"}
+#-----------------------------------------
+# Data Loading
+datIn <- fread( file = 'Chicago_Crimes_2012_to_2017.csv', nThread = 2)
+```
+
+# - Limpieza de datos cargados
+Se procede a limpiar datos y entender las clases del conjunto de entrada.
+No se pretende imputar, modificar, feature engineering....
+
+**No optimizo demasiado pronto!**
+
+```{r limpiza}
+# Quito V1
+datIn$V1 <- NULL
+
+#¿Clase de Date?
+# class(datIn$Date)
+
+# Cambio nombre a "Location Desciption"
+names(datIn)[2] <- c('LocDesc')
+names(datIn)
+```
+
+Ahora convierto a fecha "Date"
+```{r}
+# Convierto a fecha_hms
+datIn$fe_fecha <- mdy_hms( datIn$Date)
+# class(datIn$fe_fecha)
+head(datIn$fe_fecha)
+```
+
+# EDAAAAAAAA!!!!!!!
+
+```{r eda }
+# categorical plot
+x <- inspect_cat(datIn) 
+show_plot(x)
+
+# correlations in numeric columns
+x <- inspect_cor(datIn)
+show_plot(x)
+
+# feature imbalance bar plot
+x <- inspect_imb(datIn)
+show_plot(x)
+
+# memory usage barplot
+x <- inspect_mem(datIn)
+show_plot(x)
+
+# missingness barplot
+x <- inspect_na(datIn)
+show_plot(x)
+
+# histograms for numeric columns
+x <- inspect_num(datIn)
+show_plot(x)
+
+# barplot of column types
+x <- inspect_types(datIn)
+show_plot(x)
+```
+
+El EDA nos revela estas características:
+
+ * _LocDesc_: Tiene múltiples categorías. (>20)
+* _Lat/Long_: Tienen aproximadamente un 5% de NAs y el resto de variables están limpias de NA.
+* Las correlaciones que nos muestra tampoco nos son relevantes.
+
+
+# - Feature Engineering Inicial
+En esta fase lo que vamos a hacer es crear algunas variables nuevas que ya vemos que pueden ser interesantes, por ejemplo:
+
+  * _Fecha_: Vamos a crear variables de mes, dia, año, hora del día, si es mañana o tarde, día de la semana....
+ * _Distancia_: Usando long/lat.
+ * _Arrest_: Convertir a 1 y 0.
+ * _LocDesc_: Modificar apropiadamente.
+ 
+```{r featureeng}
+datIn$fe_anio    <- year(datIn$fe_fecha)
+datIn$fe_mes     <- month(datIn$fe_fecha)
+datIn$fe_hora    <- hour(datIn$fe_fecha)
+datIn$fe_dianum  <- day(datIn$fe_fecha)
+datIn$fe_diasem  <- wday(datIn$fe_fecha, label = TRUE, abbr = TRUE)
+datIn$fe_arrest  <- ifelse(datIn$Arrest == TRUE, 'Si', 'No')
+# Incorporado en V_03
+datIn$fe_lonlat  <- sqrt(datIn$Longitude^2 + datIn$Latitude^2)
+datIn$fe_binhor  <- cut(datIn$fe_hora,c(-1, 6, 12, 18, 23), c('Madru', 'Mana','Tarde', 'Noche'))
+```
+
+
+# - Conocimiento del resto de variables
+Vamos a ver qué tipo de balanceo tienen los arrestos.
+
+```{r}
+res_target <- round( prop.table(table(datIn$fe_arrest))*100, 2)
+
+kable(res_target)
+```
+
+Otra cosa que nos interesa es saber la distribución de _LocDesc_.
+¿Cuántos distritos diferentes tenemos en el conjunto.
+
+```{r}
+unique(datIn[ , .(.N), by = .(LocDesc)][order(-N)])
+```
+
+Son 98 categorías diferentes. 
+  * No son muchas para transformarlas con one-hot encoding.
+ * La categoría que predomina más es Street con 2718.
+ * Lanzaremos un modelo inicial sin transformación y luego otro modelo con transformación en frecuencias.
+ * Como versión inicial voy a _eliminar_ las filas en las que hay NA en long/lat
+ 
+```{r }
+datMod <- copy(datIn)
+datMod$Date     <- NULL
+datMod$fe_fecha <- NULL
+datMod$Arrest   <- NULL
+names(datMod)
+datMod$fe_arrest <- as.factor(datMod$fe_arrest)
+# Quito los NA a pelo!
+datMod_cl <- datMod[complete.cases(datMod), ]
+# Compruebo de nuevo proporciones del Prior!.
+round( prop.table(table(datMod_cl$fe_arrest))*100, 2)
+```
+
+
+## - Frecuencias en Arrest y Días
+En esta versión lo que hacemos es usar las frecuencias de cada categoría en vez de utilizar en one-hot.
+
+Recordar que data.table tenéis que tener en la cabeza esto:
+
+_DT[ i (fila), j (columnas), by (agrupar)]_
+
+  * En las columnas puedo definir nuevas variables.
+ * En los cálculos de las columnas puedo agregar en función del "by" que agrupa.
+ * data.table tine un conjunto de variables _internas_ que me ayudan a ciertos cálculos (p.ej: .N)
+
+
+
+```{r locdescydisasem }
+# Voy a convertir a Frequencia las variables LocDesc y fe_diasem
+datMod_cl[ , fe_locdesc := .N , by = .(LocDesc)]
+datMod_cl[ , fe_fediasem := .N , by = .(fe_diasem)]
+datMod_cl[ , fe_febinhor := .N , by = .(fe_binhor)]
+to_rem <- c('LocDesc', 'fe_diasem', 'fe_binhor')
+datMod_cl[ , (to_rem) := NULL]
+```
+
+Todas las columnas categóricas las he transformado a numéricas con su frecuencia incluyendo la nueva que había creado con los bines de las horas. 
+
+Las variables originales, las elimino.
+
+# - Vamos a modelizar.
+
+## - Train & Test
+
+```{r}
+#------------------------------- TRAIN -TEST - SPLIT 
+# Split out validation dataset
+# create a list of 80% of the rows in the original dataset we can use for training
+set.seed(7)
+validationIndex <- createDataPartition(datMod_cl$fe_arrest, p = 0.80, list = FALSE)
+
+# select 20% of the data for validation
+my_test  <- datMod_cl[-validationIndex,]
+# use the remaining 80% of data to training and testing the 
+my_train <- datMod_cl[validationIndex,]
+```
+
+## - Construyo modelo - Ranger.
+Una vez tenemos los conjuntos de entrenamiento y de test (creados por nosotros) vamos al modelo.
+
+Decido utilizar unos valores por defecto para mtry, splitrule y min.node.size si no caret hace un grid.search por defecto.
+
+```{r rangerdirect }
+library(MLmetrics)
+library(ranger)
+# Barrido con diferente número de arboles.
+val_trees <- c(100, 150, 200, 250)
+
+for (i in val_trees) {
+  print(i)  
+  fit <- ranger(
+                  fe_arrest ~. ,
+                  data = my_train,
+                  num.trees = i,
+                  importance = 'impurity',
+                  write.forest = TRUE,
+                  min.node.size = 1,
+                  splitrule = "gini",
+                  verbose = TRUE,
+                  classification = TRUE
+                )
+    
+  valor_pred <- predict(fit, data = my_test)
+  fit_acc <- Accuracy(y_pred = valor_pred$predictions, y_true = my_test$fe_arrest)
+  print(fit_acc)
+}
+```
+
+El mejor valor de num.trees es de *200* con el que se consigue un Acc de 81%.
+
